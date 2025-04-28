@@ -647,6 +647,9 @@ class SwinLayer(nn.Module):
         self.intermediate = SwinIntermediate(config, dim)
         self.output = SwinOutput(config, dim)
 
+        # added buffers to avoid tensors created at runtime for torchscript export
+        self.register_buffer("img_mask", torch.zeros((1, 1, 1, 1), dtype=torch.float32))
+
     def set_shift_and_window_size(self, input_resolution):
         if min(input_resolution) <= self.window_size:
             # if window size is larger than input resolution, we don't partition windows
@@ -658,7 +661,8 @@ class SwinLayer(nn.Module):
     def get_attn_mask(self, height, width, dtype, device):
         if self.shift_size > 0:
             # calculate attention mask for SW-MSA
-            img_mask = torch.zeros((1, height, width, 1), dtype=dtype, device=device)
+            #img_mask = torch.zeros((1, height, width, 1), dtype=dtype, device=device)
+            img_mask = self.img_mask.repeat(1, height, width, 1)
             height_slices = (
                 slice(0, -self.window_size),
                 slice(-self.window_size, -self.shift_size),
