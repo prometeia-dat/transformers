@@ -860,8 +860,8 @@ class Mask2FormerSinePositionEmbedding(nn.Module):
 
         # added buffers to avoid tensors created at runtime for torchscript export
         self.register_buffer("mask", torch.zeros((1, 1, 1), dtype=torch.bool))
-        self.register_buffer("dim_t", torch.arange(self.num_pos_feats, dtype=torch.int64)).to(torch.float32)
-        self.register_buffer("const", torch.Tensor(2), dtype=torch.float32)
+        self.register_buffer("dim_t", torch.arange(self.num_pos_feats, dtype=torch.int64).to(torch.float32))
+        self.register_buffer("const", torch.tensor(2, dtype=torch.float32))
 
     def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         if mask is None:
