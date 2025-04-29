@@ -919,6 +919,8 @@ class Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention(nn.Module):
         self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
 
+        self.register_buffer("offset_normalizer", torch.ones(2, dtype=torch.long))
+
     def with_pos_embed(self, tensor: torch.Tensor, position_embeddings: Optional[Tensor]):
         return tensor if position_embeddings is None else tensor + position_embeddings
 
@@ -962,11 +964,18 @@ class Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention(nn.Module):
         )
         # batch_size, num_queries, n_heads, n_levels, n_points, 2
         if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.tensor(
-                [[shape[1], shape[0]] for shape in spatial_shapes_list],
-                dtype=torch.long,
-                device=reference_points.device,
-            )
+            offset_normalizer_list = []
+            for shape in spatial_shapes_list:
+                self.offset_normalizer[0] *= shape[1]
+                self.offset_normalizer[1] *= shape[0]
+                offset_normalizer_list.append(self.offset_normalizer.clone())
+                self.offset_normalizer.fill_(1)
+            offset_normalizer = torch.stack(offset_normalizer_list)
+            # offset_normalizer = torch.tensor(
+            #     [[shape[1], shape[0]] for shape in spatial_shapes_list],
+            #     dtype=torch.long,
+            #     device=reference_points.device,
+            # )
             sampling_locations = (
                 reference_points[:, :, None, :, None, :]
                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
@@ -1281,7 +1290,7 @@ class Mask2FormerPixelDecoder(nn.Module):
 
         # added buffers to avoid tensors created at runtime for torchscript export
         self.register_buffer("masks", torch.zeros((1, 1, 1), dtype=torch.bool))
-        self.register_buffer("spatial_shapes", torch.ones((1, 1), dtype=torch.long))
+        self.register_buffer("spatial_shapes", torch.ones(2, dtype=torch.long))
 
     def get_valid_ratio(self, mask, dtype=torch.float32):
         """Get the valid ratio of all feature maps."""
@@ -1322,10 +1331,10 @@ class Mask2FormerPixelDecoder(nn.Module):
         # Prepare encoder inputs (by flattening)
         spatial_shapes_list = []
         for embed in input_embeds:
-            self.spatial_shapes[0] *= embed[2]
-            self.spatial_shapes[1] *= embed[3]
-            spatial_shapes_list.append(self.spatial_shapes)
-            self.spatial_shapes._fill(1)
+            self.spatial_shapes[0] *= embed.shape[2]
+            self.spatial_shapes[1] *= embed.shape[3]
+            spatial_shapes_list.append(self.spatial_shapes.clone())
+            self.spatial_shapes.fill_(1)
 
         #spatial_shapes = [(embed.shape[2], embed.shape[3]) for embed in input_embeds]
         input_embeds_flat = torch.cat([embed.flatten(2).transpose(1, 2) for embed in input_embeds], 1)
