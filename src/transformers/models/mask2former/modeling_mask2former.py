@@ -858,9 +858,15 @@ class Mask2FormerSinePositionEmbedding(nn.Module):
         self.normalize = normalize
         self.scale = 2 * math.pi if scale is None else scale
 
+        # added buffers to avoid tensors created at runtime for torchscript export
+        self.register_buffer("mask", torch.zeros((1, 1, 1), dtype=torch.bool))
+        self.register_buffer("dim_t", torch.arange(self.num_pos_feats, dtype=torch.int64).to(torch.float32))
+        self.register_buffer("const", torch.tensor(2, dtype=torch.float32))
+
     def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         if mask is None:
-            mask = torch.zeros((x.size(0), x.size(2), x.size(3)), device=x.device, dtype=torch.bool)
+            mask = self.mask.repeat(x.size(0), x.size(2), x.size(3))
+            #mask = torch.zeros((x.size(0), x.size(2), x.size(3)), device=x.device, dtype=torch.bool)
         not_mask = (~mask).to(x.dtype)
         y_embed = not_mask.cumsum(1)
         x_embed = not_mask.cumsum(2)
@@ -869,8 +875,8 @@ class Mask2FormerSinePositionEmbedding(nn.Module):
             y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
-        dim_t = torch.arange(self.num_pos_feats, dtype=torch.int64, device=x.device).type_as(x)
-        dim_t = self.temperature ** (2 * torch.div(dim_t, 2, rounding_mode="floor") / self.num_pos_feats)
+        #dim_t = torch.arange(self.num_pos_feats, dtype=torch.int64, device=x.device).type_as(x)
+        dim_t = self.temperature ** (self.const * torch.div(self.dim_t, self.const, rounding_mode="floor") / self.num_pos_feats)
 
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
@@ -912,6 +918,8 @@ class Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention(nn.Module):
         self.attention_weights = nn.Linear(embed_dim, num_heads * n_levels * n_points)
         self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
+
+        self.register_buffer("offset_normalizer", torch.ones(2, dtype=torch.long))
 
     def with_pos_embed(self, tensor: torch.Tensor, position_embeddings: Optional[Tensor]):
         return tensor if position_embeddings is None else tensor + position_embeddings
@@ -956,11 +964,19 @@ class Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention(nn.Module):
         )
         # batch_size, num_queries, n_heads, n_levels, n_points, 2
         if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.tensor(
-                [[shape[1], shape[0]] for shape in spatial_shapes_list],
-                dtype=torch.long,
-                device=reference_points.device,
-            )
+            offset_normalizer_list = []
+            for shape in spatial_shapes_list:
+                tmp_offset_normalizer = self.offset_normalizer.clone()
+                tmp_offset_normalizer[0] = shape[1]
+                tmp_offset_normalizer[1] = shape[0]
+                offset_normalizer_list.append(tmp_offset_normalizer)
+            offset_normalizer = torch.stack(offset_normalizer_list)
+
+            # offset_normalizer = torch.tensor(
+            #     [[shape[1], shape[0]] for shape in spatial_shapes_list],
+            #     dtype=torch.long,
+            #     device=reference_points.device,
+            # )
             sampling_locations = (
                 reference_points[:, :, None, :, None, :]
                 + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
@@ -1088,8 +1104,12 @@ class Mask2FormerPixelDecoderEncoderOnly(nn.Module):
             [Mask2FormerPixelDecoderEncoderLayer(config) for _ in range(config.encoder_layers)]
         )
 
+        # added buffers to avoid tensors created at runtime for torchscript export
+        self.register_buffer("linspace_h", torch.linspace(0.5, 1024 - 0.5, 1024, dtype=torch.float32))
+        self.register_buffer("linspace_w", torch.linspace(0.5, 1024 - 0.5, 1024, dtype=torch.float32))
+
     @staticmethod
-    def get_reference_points(spatial_shapes_list, valid_ratios, device):
+    def get_reference_points(spatial_shapes_list, valid_ratios, linspace_h, linspace_w):
         """
         Get reference points for each feature map. Used in decoder.
 
@@ -1106,8 +1126,8 @@ class Mask2FormerPixelDecoderEncoderOnly(nn.Module):
         reference_points_list = []
         for lvl, (height, width) in enumerate(spatial_shapes_list):
             ref_y, ref_x = torch.meshgrid(
-                torch.linspace(0.5, height - 0.5, height, dtype=valid_ratios.dtype, device=device),
-                torch.linspace(0.5, width - 0.5, width, dtype=valid_ratios.dtype, device=device),
+                linspace_h[:height],
+                linspace_w[:width],
                 indexing="ij",
             )
             ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * height)
@@ -1165,7 +1185,7 @@ class Mask2FormerPixelDecoderEncoderOnly(nn.Module):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         hidden_states = inputs_embeds
-        reference_points = self.get_reference_points(spatial_shapes_list, valid_ratios, device=inputs_embeds.device)
+        reference_points = self.get_reference_points(spatial_shapes_list, valid_ratios, self.linspace_h, self.linspace_w)
 
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -1269,6 +1289,10 @@ class Mask2FormerPixelDecoder(nn.Module):
         self.lateral_convolutions = lateral_convs[::-1]
         self.output_convolutions = output_convs[::-1]
 
+        # added buffers to avoid tensors created at runtime for torchscript export
+        self.register_buffer("masks", torch.zeros((1, 1, 1), dtype=torch.bool))
+        self.register_buffer("spatial_shapes", torch.ones(2, dtype=torch.long))
+
     def get_valid_ratio(self, mask, dtype=torch.float32):
         """Get the valid ratio of all feature maps."""
 
@@ -1301,13 +1325,22 @@ class Mask2FormerPixelDecoder(nn.Module):
             position_embeddings.append(self.position_embedding(x))
 
         masks = [
-            torch.zeros((x.size(0), x.size(2), x.size(3)), device=x.device, dtype=torch.bool) for x in input_embeds
+            self.masks.repeat(x.size(0), x.size(2), x.size(3)) for x in input_embeds
+            #torch.zeros((x.size(0), x.size(2), x.size(3)), device=x.device, dtype=torch.bool) for x in input_embeds
         ]
 
         # Prepare encoder inputs (by flattening)
-        spatial_shapes_list = [(embed.shape[2], embed.shape[3]) for embed in input_embeds]
+        spatial_shapes_list = []
+        for embed in input_embeds:
+            tmp_spatial_shapes = self.spatial_shapes.clone()
+            tmp_spatial_shapes[0] = embed.shape[2]
+            tmp_spatial_shapes[1] = embed.shape[3]
+            spatial_shapes_list.append(tmp_spatial_shapes)
+
+        #spatial_shapes = [(embed.shape[2], embed.shape[3]) for embed in input_embeds]
         input_embeds_flat = torch.cat([embed.flatten(2).transpose(1, 2) for embed in input_embeds], 1)
-        spatial_shapes = torch.as_tensor(spatial_shapes_list, dtype=torch.long, device=input_embeds_flat.device)
+        #spatial_shapes = torch.as_tensor(spatial_shapes_list, dtype=torch.long, device=input_embeds_flat.device)
+        spatial_shapes = torch.stack(spatial_shapes_list)
         masks_flat = torch.cat([mask.flatten(1) for mask in masks], 1)
 
         position_embeddings = [embed.flatten(2).transpose(1, 2) for embed in position_embeddings]
