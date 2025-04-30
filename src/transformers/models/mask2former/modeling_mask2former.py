@@ -966,11 +966,12 @@ class Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention(nn.Module):
         if reference_points.shape[-1] == 2:
             offset_normalizer_list = []
             for shape in spatial_shapes_list:
-                self.offset_normalizer[0] *= shape[1]
-                self.offset_normalizer[1] *= shape[0]
-                offset_normalizer_list.append(self.offset_normalizer.clone())
-                self.offset_normalizer.fill_(1)
+                tmp_offset_normalizer = self.offset_normalizer.clone()
+                tmp_offset_normalizer[0] = shape[1]
+                tmp_offset_normalizer[1] = shape[0]
+                offset_normalizer_list.append(tmp_offset_normalizer)
             offset_normalizer = torch.stack(offset_normalizer_list)
+
             # offset_normalizer = torch.tensor(
             #     [[shape[1], shape[0]] for shape in spatial_shapes_list],
             #     dtype=torch.long,
@@ -1331,10 +1332,10 @@ class Mask2FormerPixelDecoder(nn.Module):
         # Prepare encoder inputs (by flattening)
         spatial_shapes_list = []
         for embed in input_embeds:
-            self.spatial_shapes[0] *= embed.shape[2]
-            self.spatial_shapes[1] *= embed.shape[3]
-            spatial_shapes_list.append(self.spatial_shapes.clone())
-            self.spatial_shapes.fill_(1)
+            tmp_spatial_shapes = self.spatial_shapes.clone()
+            tmp_spatial_shapes[0] = embed.shape[2]
+            tmp_spatial_shapes[1] = embed.shape[3]
+            spatial_shapes_list.append(tmp_spatial_shapes)
 
         #spatial_shapes = [(embed.shape[2], embed.shape[3]) for embed in input_embeds]
         input_embeds_flat = torch.cat([embed.flatten(2).transpose(1, 2) for embed in input_embeds], 1)
