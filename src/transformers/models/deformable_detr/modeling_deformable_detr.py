@@ -441,10 +441,17 @@ class DeformableDetrConvModel(nn.Module):
     This module adds 2D position embeddings to all intermediate feature maps of the convolutional encoder.
     """
 
-    def __init__(self, conv_encoder, position_embedding):
+    def __init__(self, config, conv_encoder):
         super().__init__()
         self.conv_encoder = conv_encoder
-        self.position_embedding = position_embedding
+        num_pos_features = config.d_model // 2
+        if config.position_embedding_type == "sine":
+            # TODO find a better way of exposing other arguments
+            self.position_embedding = DeformableDetrSinePositionEmbedding(num_pos_features, normalize=True)
+        elif config.position_embedding_type == "learned":
+            self.position_embedding = DeformableDetrLearnedPositionEmbedding(num_pos_features)
+        else:
+            raise ValueError(f"Not supported {config.position_embedding_type}")
 
     def forward(self, pixel_values, pixel_mask):
         # send pixel_values and pixel_mask through backbone to get list of (feature_map, pixel_mask) tuples
@@ -473,7 +480,10 @@ class DeformableDetrSinePositionEmbedding(nn.Module):
         if scale is None:
             scale = 2 * math.pi
         self.scale = scale
-
+        # FIX for exported torchscript change of device
+        self.register_buffer("dim_t", torch.arange(self.embedding_dim, dtype=torch.int64).to(torch.float32), persistent=True)
+        self.register_buffer("const", torch.tensor(2, dtype=torch.float32), persistent=True)
+    
     def forward(self, pixel_values, pixel_mask):
         if pixel_mask is None:
             raise ValueError("No pixel mask provided")
@@ -484,8 +494,10 @@ class DeformableDetrSinePositionEmbedding(nn.Module):
             y_embed = (y_embed - 0.5) / (y_embed[:, -1:, :] + eps) * self.scale
             x_embed = (x_embed - 0.5) / (x_embed[:, :, -1:] + eps) * self.scale
 
-        dim_t = torch.arange(self.embedding_dim, dtype=pixel_values.dtype, device=pixel_values.device)
-        dim_t = self.temperature ** (2 * torch.div(dim_t, 2, rounding_mode="floor") / self.embedding_dim)
+        dim_t = self.dim_t.to(pixel_values.dtype)
+        # OLD code
+        # dim_t = torch.arange(self.embedding_dim, dtype=pixel_values.dtype, device=pixel_values.device)
+        dim_t = self.temperature ** (self.const * torch.div(dim_t, self.const, rounding_mode="floor") / self.embedding_dim)
 
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
@@ -505,11 +517,17 @@ class DeformableDetrLearnedPositionEmbedding(nn.Module):
         super().__init__()
         self.row_embeddings = nn.Embedding(50, embedding_dim)
         self.column_embeddings = nn.Embedding(50, embedding_dim)
+        # FIX for exported torchscript change of device
+        self.register_buffer("width_values", torch.arange(50), persistent=True)
+        self.register_buffer("height_values", torch.arange(50), persistent=True)
 
     def forward(self, pixel_values, pixel_mask=None):
         height, width = pixel_values.shape[-2:]
-        width_values = torch.arange(width, device=pixel_values.device)
-        height_values = torch.arange(height, device=pixel_values.device)
+        # OLD code
+        # width_values = torch.arange(width, device=pixel_values.device)
+        # height_values = torch.arange(height, device=pixel_values.device)
+        width_values = self.width_values[:width]
+        height_values = self.height_values[:height]
         x_emb = self.column_embeddings(width_values)
         y_emb = self.row_embeddings(height_values)
         pos = torch.cat([x_emb.unsqueeze(0).repeat(height, 1, 1), y_emb.unsqueeze(1).repeat(1, width, 1)], dim=-1)
@@ -570,9 +588,6 @@ class DeformableDetrMultiscaleDeformableAttention(nn.Module):
 
         self.disable_custom_kernels = config.disable_custom_kernels
 
-    def with_pos_embed(self, tensor: torch.Tensor, position_embeddings: Optional[Tensor]):
-        return tensor if position_embeddings is None else tensor + position_embeddings
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -588,7 +603,7 @@ class DeformableDetrMultiscaleDeformableAttention(nn.Module):
     ):
         # add position embeddings to the hidden states before projecting to queries and keys
         if position_embeddings is not None:
-            hidden_states = self.with_pos_embed(hidden_states, position_embeddings)
+            hidden_states = hidden_states + position_embeddings
 
         batch_size, num_queries, _ = hidden_states.shape
         batch_size, sequence_length, _ = encoder_hidden_states.shape
@@ -1095,11 +1110,14 @@ class DeformableDetrEncoder(DeformableDetrPreTrainedModel):
         self.dropout = config.dropout
         self.layers = nn.ModuleList([DeformableDetrEncoderLayer(config) for _ in range(config.encoder_layers)])
 
+        # FIX for exported torchscript change of device
+        self.register_buffer("linspace_h", torch.linspace(0.5, 1024 - 0.5, 1024, dtype=torch.float32), persistent=True)
+        self.register_buffer("linspace_w", torch.linspace(0.5, 1024 - 0.5, 1024, dtype=torch.float32), persistent=True)
+
         # Initialize weights and apply final processing
         self.post_init()
 
-    @staticmethod
-    def get_reference_points(spatial_shapes, valid_ratios, device):
+    def get_reference_points(self, spatial_shapes, valid_ratios, device):
         """
         Get reference points for each feature map. Used in decoder.
 
@@ -1115,9 +1133,21 @@ class DeformableDetrEncoder(DeformableDetrPreTrainedModel):
         """
         reference_points_list = []
         for level, (height, width) in enumerate(spatial_shapes):
-            ref_y, ref_x = meshgrid(
-                torch.linspace(0.5, height - 0.5, height, dtype=valid_ratios.dtype, device=device),
-                torch.linspace(0.5, width - 0.5, width, dtype=valid_ratios.dtype, device=device),
+            # OLD code
+            # ref_y, ref_x = meshgrid(
+            #     torch.linspace(
+            #         0.5,height - 0.5,height,
+            #         dtype=enc_output.dtype,device=enc_output.device,
+            #     ),
+            #     torch.linspace(
+            #         0.5,width - 0.5,width,
+            #         dtype=enc_output.dtype,device=enc_output.device,
+            #     ),
+            #     indexing="ij",
+            # )
+            ref_y, ref_x = torch.meshgrid(
+                self.linspace_h[:height],
+                self.linspace_w[:width],
                 indexing="ij",
             )
             # TODO: valid_ratios could be useless here. check https://github.com/fundamentalvision/Deformable-DETR/issues/36
@@ -1430,8 +1460,7 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
 
         # Create backbone + positional encoding
         backbone = DeformableDetrConvEncoder(config)
-        position_embeddings = build_position_encoding(config)
-        self.backbone = DeformableDetrConvModel(backbone, position_embeddings)
+        self.backbone = DeformableDetrConvModel(config, backbone)
 
         # Create input projection layers
         if config.num_feature_levels > 1:
@@ -1489,6 +1518,13 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
             self.pos_trans_norm = nn.LayerNorm(config.d_model * 2)
         else:
             self.reference_points = nn.Linear(config.d_model, 2)
+
+        # FIX for exported torchscript change of device
+        self.register_buffer("pixel_mask", torch.ones([1], dtype=torch.long), persistent=True)
+        self.register_buffer("spatial_shapes", torch.ones(2, dtype=torch.long), persistent=True)
+        self.register_buffer("level_start_index", torch.zeros([1], dtype=torch.long), persistent=True)
+        self.register_buffer("linspace_h", torch.linspace(0, 1024 - 1, 1024, dtype=torch.float32), persistent=True)
+        self.register_buffer("linspace_w", torch.linspace(0, 1024 - 1, 1024, dtype=torch.float32), persistent=True)
 
         self.post_init()
 
@@ -1557,21 +1593,19 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
             valid_height = torch.sum(~mask_flatten_[:, :, 0, 0], 1)
             valid_width = torch.sum(~mask_flatten_[:, 0, :, 0], 1)
 
-            grid_y, grid_x = meshgrid(
-                torch.linspace(
-                    0,
-                    height - 1,
-                    height,
-                    dtype=enc_output.dtype,
-                    device=enc_output.device,
-                ),
-                torch.linspace(
-                    0,
-                    width - 1,
-                    width,
-                    dtype=enc_output.dtype,
-                    device=enc_output.device,
-                ),
+            # OLD code
+            # grid_y, grid_x = meshgrid(
+            #     torch.linspace(
+            #         0,height - 1,height,dtype=enc_output.dtype,device=enc_output.device,
+            #     ),
+            #     torch.linspace(
+            #         0,width - 1,width,dtype=enc_output.dtype,device=enc_output.device,
+            #     ),
+            #     indexing="ij",
+            # )
+            grid_y, grid_x = torch.meshgrid(
+                self.linspace_h[:height],
+                self.linspace_w[:width],
                 indexing="ij",
             )
             grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
@@ -1640,10 +1674,12 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size, num_channels, height, width = pixel_values.shape
-        device = pixel_values.device
 
         if pixel_mask is None:
-            pixel_mask = torch.ones(((batch_size, height, width)), dtype=torch.long, device=device)
+            pixel_mask = self.pixel_mask.repeat(batch_size, height, width)
+            # OLD code
+            # device = pixel_values.device
+            # pixel_mask = torch.ones(((batch_size, height, width)), dtype=torch.long, device=device)
 
         # Extract multi-scale feature maps of same resolution `config.d_model` (cf Figure 4 in paper)
         # First, sent pixel_values + pixel_mask through Backbone to obtain the features
@@ -1687,20 +1723,34 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
         spatial_shapes_list = []
         for level, (source, mask, pos_embed) in enumerate(zip(sources, masks, position_embeddings_list)):
             batch_size, num_channels, height, width = source.shape
-            spatial_shape = (height, width)
-            spatial_shapes_list.append(spatial_shape)
+            tmp_spatial_shapes = self.spatial_shapes.clone()
+            tmp_spatial_shapes[0] = height
+            tmp_spatial_shapes[1] = width
+            spatial_shapes_list.append(tmp_spatial_shapes)            
+            # OLD code
+            # spatial_shape = (height, width)
+            # spatial_shapes_list.append(spatial_shape)
             source = source.flatten(2).transpose(1, 2)
             mask = mask.flatten(1)
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
-            lvl_pos_embed = pos_embed + self.level_embed[level].view(1, 1, -1)
+            
+            lvl_pos_embed = self.level_embed[level].view(1, 1, -1)
+            lvl_pos_embed = pos_embed + lvl_pos_embed
+            ## OLD wrong code for export
+            # lvl_pos_embed = pos_embed + self.level_embed[level].view(1, 1, -1)
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             source_flatten.append(source)
             mask_flatten.append(mask)
         source_flatten = torch.cat(source_flatten, 1)
         mask_flatten = torch.cat(mask_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
-        spatial_shapes = torch.as_tensor(spatial_shapes_list, dtype=torch.long, device=source_flatten.device)
-        level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        
+        spatial_shapes = torch.stack(spatial_shapes_list)
+        # OLD code
+        # spatial_shapes = torch.as_tensor(spatial_shapes_list, dtype=torch.long, device=source_flatten.device)
+        level_start_index = torch.cat((self.level_start_index, spatial_shapes.prod(1).cumsum(0)[:-1]))
+        # OLD code
+        # level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m, dtype=source_flatten.dtype) for m in masks], 1)
 
         # Fourth, sent source_flatten + mask_flatten + lvl_pos_embed_flatten (backbone + proj layer output) through encoder
