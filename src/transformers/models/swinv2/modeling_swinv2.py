@@ -647,6 +647,9 @@ class Swinv2Layer(nn.Module):
         self.intermediate = Swinv2Intermediate(config, dim)
         self.output = Swinv2Output(config, dim)
         self.layernorm_after = nn.LayerNorm(dim, eps=config.layer_norm_eps)
+        
+        # added buffers to avoid tensors created at runtime for torchscript export
+        self.register_buffer("img_mask", torch.zeros((1, 1, 1, 1), dtype=torch.float32))
 
     def _compute_window_shift(self, target_window_size, target_shift_size) -> tuple[tuple[int, int], tuple[int, int]]:
         window_size = [r if r <= w else w for r, w in zip(self.input_resolution, target_window_size)]
@@ -656,7 +659,8 @@ class Swinv2Layer(nn.Module):
     def get_attn_mask(self, height, width, dtype):
         if self.shift_size > 0:
             # calculate attention mask for shifted window multihead self attention
-            img_mask = torch.zeros((1, height, width, 1), dtype=dtype)
+            # img_mask = torch.zeros((1, height, width, 1), dtype=dtype)
+            img_mask = self.img_mask.repeat(1, height, width, 1)
             height_slices = (
                 slice(0, -self.window_size),
                 slice(-self.window_size, -self.shift_size),
@@ -713,8 +717,8 @@ class Swinv2Layer(nn.Module):
         hidden_states_windows = window_partition(shifted_hidden_states, self.window_size)
         hidden_states_windows = hidden_states_windows.view(-1, self.window_size * self.window_size, channels)
         attn_mask = self.get_attn_mask(height_pad, width_pad, dtype=hidden_states.dtype)
-        if attn_mask is not None:
-            attn_mask = attn_mask.to(hidden_states_windows.device)
+        # if attn_mask is not None:
+        #     attn_mask = attn_mask.to(hidden_states_windows.device)
 
         attention_outputs = self.attention(
             hidden_states_windows, attn_mask, head_mask, output_attentions=output_attentions
