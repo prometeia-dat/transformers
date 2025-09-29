@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any
 
 from ..integrations import prepare_for_hqq_linear
 from ..utils import is_accelerate_available, is_hqq_available, is_torch_available, logging
@@ -46,7 +46,6 @@ class HqqHfQuantizer(HfQuantizer):
     """
     HQQ quantizer base HF class.
     nn.Linear modules are first tagged with quant_config in _process_model_before_weight_loading().
-    The actual quantization and offloading to the GPU is done in check_quantized_param().
     """
 
     use_keep_in_fp32_modules = False
@@ -56,7 +55,7 @@ class HqqHfQuantizer(HfQuantizer):
 
     def __init__(self, quantization_config, **kwargs):
         super().__init__(quantization_config, **kwargs)
-        self.torch_dtype = None
+        self.dtype = None
         self.using_multi_gpu = False
 
     def validate_environment(self, *args, **kwargs):
@@ -65,23 +64,14 @@ class HqqHfQuantizer(HfQuantizer):
                 "A valid HQQ version (>=0.2.1) is not available. Please follow the instructions to install it: `https://github.com/mobiusml/hqq/`."
             )
 
-        if kwargs.get("from_tf", False) or kwargs.get("from_flax", False):
-            raise ValueError(
-                "Converting weights from tf/flax weights is currently not supported, please make"
-                " sure the weights are in PyTorch format."
-            )
-
-        if not torch.cuda.is_available():
-            raise RuntimeError("No GPU found. A GPU is needed for quantization.")
-
-        if self.torch_dtype is None:
-            if "torch_dtype" in kwargs:
-                self.torch_dtype = kwargs["torch_dtype"]
+        if self.dtype is None:
+            if "dtype" in kwargs:
+                self.dtype = kwargs["dtype"]
             else:
-                self.torch_dtype = torch.float32
-                logger.info("Setting torch_dtype to torch.float32 as the default value since it was not specified.")
+                self.dtype = torch.float32
+                logger.info("Setting dtype to torch.float32 as the default value since it was not specified.")
 
-        device_map = kwargs.get("device_map", None)
+        device_map = kwargs.get("device_map")
         if isinstance(device_map, dict):
             if "cpu" in device_map.values() or "disk" in device_map.values():
                 raise ValueError(
@@ -92,8 +82,8 @@ class HqqHfQuantizer(HfQuantizer):
                 self.using_multi_gpu = len(set(device_map.values())) > 1
 
     def update_missing_keys(
-        self, model: "PreTrainedModel", missing_keys: List[str], prefix: str, **kwargs
-    ) -> List[str]:
+        self, model: "PreTrainedModel", missing_keys: list[str], prefix: str, **kwargs
+    ) -> list[str]:
         if self.pre_quantized:
             return [key for key in missing_keys if ("weight" not in key)]
         else:
@@ -101,8 +91,8 @@ class HqqHfQuantizer(HfQuantizer):
 
     # Adds missing keys for HQQLinear modules that are loaded but the model with initialized with torch.nn.Linear
     def update_expected_keys(
-        self, model: "PreTrainedModel", expected_keys: List[str], loaded_keys: List[str]
-    ) -> List[str]:
+        self, model: "PreTrainedModel", expected_keys: list[str], loaded_keys: list[str]
+    ) -> list[str]:
         if not self.pre_quantized:
             return expected_keys
 
@@ -135,7 +125,11 @@ class HqqHfQuantizer(HfQuantizer):
 
             # Append new expected layers based on _ref_keys
             _ref_keys = HQQLinear(
-                linear_layer=None, quant_config=None, compute_dtype=torch.float16, device="cpu"
+                linear_layer=None,
+                quant_config=None,
+                compute_dtype=torch.float16,
+                device="cpu",
+                del_orig=False,
             ).state_dict_keys() - {"bias"}
 
             # Clean-up
@@ -157,12 +151,12 @@ class HqqHfQuantizer(HfQuantizer):
 
         return list(new_keys)
 
-    def check_quantized_param(
+    def param_needs_quantization(
         self,
         model: "PreTrainedModel",
         param_value: "torch.Tensor",
         param_name: str,
-        state_dict: Dict[str, Any],
+        state_dict: dict[str, Any],
         **kwargs,
     ) -> bool:
         if is_hqq_available():
@@ -170,7 +164,7 @@ class HqqHfQuantizer(HfQuantizer):
         module, tensor_name = get_module_from_name(model, param_name)
 
         if self.pre_quantized:
-            return (isinstance(module, torch.nn.Linear) or isinstance(module, HQQLinear)) and tensor_name != "weight"
+            return (isinstance(module, (torch.nn.Linear, HQQLinear))) and tensor_name != "weight"
         else:
             return (
                 isinstance(module, torch.nn.Linear)
@@ -186,8 +180,7 @@ class HqqHfQuantizer(HfQuantizer):
         param_value: "torch.Tensor",
         param_name: str,
         target_device: "torch.device",
-        state_dict: Dict[str, Any],
-        unexpected_keys: List[str],
+        state_dict: dict[str, Any],
     ):
         """
         Each nn.Linear layer is processed here.
@@ -197,6 +190,15 @@ class HqqHfQuantizer(HfQuantizer):
 
         if is_hqq_available():
             from hqq.core.quantize import HQQLinear
+
+            # TODO: This is a compatibility hack. HQQ-quantized linear layers do not have a `weight` attribute,
+            # but some models attempt to access `weight.dtype` during the forward pass. To prevent runtime errors,
+            # we patch HQQLinear with a dummy `weight` property that returns an empty tensor with the correct dtype and device.
+            @property
+            def weight(_self: HQQLinear):
+                return torch.empty(0, dtype=_self.compute_dtype, device=_self.device)
+
+            HQQLinear.weight = weight
 
         module, tensor_name = get_module_from_name(model, param_name)
         layer_name = ".".join(param_name.split(".")[:-1])
@@ -212,8 +214,6 @@ class HqqHfQuantizer(HfQuantizer):
         for k, v in state_dict.items():
             if layer_name + "." in k:
                 module_state_dict[k.split(".")[-1]] = v
-                if unexpected_keys is not None and k in unexpected_keys:
-                    unexpected_keys.remove(k)
 
         if self.pre_quantized:
             if isinstance(module, HQQLinear):
@@ -222,8 +222,9 @@ class HqqHfQuantizer(HfQuantizer):
                 hqq_layer = HQQLinear(
                     linear_layer=None,
                     quant_config=None,
-                    compute_dtype=self.torch_dtype,
+                    compute_dtype=self.dtype,
                     device=target_device,
+                    del_orig=False,
                 )
 
             hqq_layer.load_state_dict(module_state_dict)
@@ -242,8 +243,8 @@ class HqqHfQuantizer(HfQuantizer):
             return
 
         # Step 1: populate module with weight/bias from module state dict
-        for key in module_state_dict:
-            setattr(module, key, torch.nn.Parameter(module_state_dict[key]))
+        for key, tensor in module_state_dict.items():
+            setattr(module, key, torch.nn.Parameter(tensor))
 
         # Step 2: Replace module with either HQQLinear or move it to device. We do this via setattr on the parent as doing on it on the module
         # directly doesn't work.
@@ -265,7 +266,7 @@ class HqqHfQuantizer(HfQuantizer):
             hqq_layer = HQQLinear(
                 module,
                 quant_config=module_quant_config,
-                compute_dtype=self.torch_dtype,
+                compute_dtype=self.dtype,
                 device=target_device,
                 del_orig=True,
             )
@@ -279,7 +280,7 @@ class HqqHfQuantizer(HfQuantizer):
             setattr(parent_module, node, hqq_layer)
 
         else:
-            module = module.to(dtype=self.torch_dtype, device=target_device)
+            module = module.to(dtype=self.dtype, device=target_device)
             setattr(parent_module, node, module)
 
         torch.cuda.empty_cache()

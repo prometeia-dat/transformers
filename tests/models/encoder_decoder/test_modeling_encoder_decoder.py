@@ -22,7 +22,6 @@ from transformers.testing_utils import (
     Expectations,
     require_deterministic_for_xpu,
     require_torch,
-    require_torch_sdpa,
     slow,
     torch_device,
 )
@@ -412,6 +411,10 @@ class EncoderDecoderMixin:
         labels,
         **kwargs,
     ):
+        # force eager attention to support output attentions
+        config._attn_implementation = "eager"
+        decoder_config._attn_implementation = "eager"
+
         # make the decoder inputs a different shape from the encoder inputs to harden the test
         decoder_input_ids = decoder_input_ids[:, :-1]
         decoder_attention_mask = decoder_attention_mask[:, :-1]
@@ -445,10 +448,15 @@ class EncoderDecoderMixin:
         # config file. Contrarily to most models, changing the model's config won't work -- the defaults are loaded
         # from the inner models' configurations.
 
+        # force eager attention to support output attentions
+        config._attn_implementation = "eager"
+        decoder_config._attn_implementation = "eager"
+
         decoder_input_ids = decoder_input_ids[:, :-1]
         decoder_attention_mask = decoder_attention_mask[:, :-1]
         encoder_model, decoder_model = self.get_encoder_decoder_model(config, decoder_config)
         enc_dec_model = EncoderDecoderModel(encoder=encoder_model, decoder=decoder_model)
+        enc_dec_model.config._attn_implementation = "eager"  # model config -> won't work
         enc_dec_model.config.output_attentions = True  # model config -> won't work
         enc_dec_model.to(torch_device)
         outputs_encoder_decoder = enc_dec_model(
@@ -687,7 +695,6 @@ class EncoderDecoderMixin:
                 max_diff = np.amax(np.abs(out_1 - out_2))
                 self.assertLessEqual(max_diff, 1e-5)
 
-    @require_torch_sdpa
     def test_sdpa_can_dispatch_composite_models(self):
         if not self.supports_sdpa:
             self.skipTest("SDPA is not supported")
@@ -800,11 +807,14 @@ class BertEncoderDecoderModelTest(EncoderDecoderMixin, unittest.TestCase):
         encoder_config = config_and_inputs["config"]
         decoder_config = config_and_inputs["decoder_config"]
 
+        encoder_config._attn_implementation = "eager"
+        decoder_config._attn_implementation = "eager"
         encoder_config.position_embedding_type = "relative_key_query"
         decoder_config.position_embedding_type = "relative_key_query"
 
-        config = EncoderDecoderConfig.from_encoder_decoder_configs(encoder_config, decoder_config)
-        model = EncoderDecoderModel(config).eval().to(torch_device)
+        encoder_model, decoder_model = self.get_encoder_decoder_model(encoder_config, decoder_config)
+        model = EncoderDecoderModel(encoder=encoder_model, decoder=decoder_model).eval().to(torch_device)
+        model.config._attn_implementation = "eager"  # model config -> won't work
 
         logits = model(
             input_ids=config_and_inputs["input_ids"], decoder_input_ids=config_and_inputs["decoder_input_ids"]
@@ -829,7 +839,6 @@ class BertEncoderDecoderModelTest(EncoderDecoderMixin, unittest.TestCase):
         input_dict = tokenizer(
             [ARTICLE_SIGMA, ARTICLE_AMERICA],
             padding="max_length",
-            pad_to_max_length=True,
             max_length=512,
             return_tensors="pt",
         )

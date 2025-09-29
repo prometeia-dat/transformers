@@ -159,7 +159,7 @@ class Int8SymmetricQuantizer(HfQuantizer):
             pre_quantized=self.pre_quantized,
         )
 
-    def check_quantized_param(
+    def param_needs_quantization(
         self,
         model,
         param_value: "torch.Tensor",
@@ -187,7 +187,6 @@ class Int8SymmetricQuantizer(HfQuantizer):
         param_name: str,
         target_device: "torch.device",
         state_dict: dict[str, Any],
-        unexpected_keys: Optional[list[str]] = None,
     ):
         """
         Quantizes weights to INT8 symmetric format.
@@ -232,7 +231,7 @@ class Int8SymmetricQuantizer(HfQuantizer):
 # Example usage
 if __name__ == "__main__":
     model_int8 = AutoModelForCausalLM.from_pretrained(
-        "meta-llama/Llama-3.2-1B", quantization_config=Int8SymmetricConfig(), torch_dtype=torch.float, device_map="cpu"
+        "meta-llama/Llama-3.2-1B", quantization_config=Int8SymmetricConfig(), dtype=torch.float, device_map="cpu"
     )
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")

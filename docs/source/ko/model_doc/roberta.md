@@ -26,7 +26,7 @@ rendered properly in your Markdown viewer.
 
 ## 개요[[overview]]
 
-RoBERTa 모델은 Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Mandar Joshi, Danqi Chen, Omer Levy, Mike Lewis, Luke Zettlemoyer, Veselin Stoyanov가 제안한 논문 [RoBERTa: A Robustly Optimized BERT Pretraining Approach](https://arxiv.org/abs/1907.11692)에서 소개되었습니다. 이 모델은 2018년에 구글에서 발표한 BERT 모델을 기반으로 합니다.
+RoBERTa 모델은 Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Mandar Joshi, Danqi Chen, Omer Levy, Mike Lewis, Luke Zettlemoyer, Veselin Stoyanov가 제안한 논문 [RoBERTa: A Robustly Optimized BERT Pretraining Approach](https://huggingface.co/papers/1907.11692)에서 소개되었습니다. 이 모델은 2018년에 구글에서 발표한 BERT 모델을 기반으로 합니다.
 
 RoBERTa는 BERT를 기반으로 하며, 주요 하이퍼파라미터를 수정하고, 사전 학습 단계에서 다음 문장 예측(Next Sentence Prediction)을 제거했으며, 훨씬 더 큰 미니 배치 크기와 학습률을 사용하여 학습을 진행했습니다.
 
@@ -112,8 +112,6 @@ RoBERTa를 처음 다룰 때 도움이 되는 Hugging Face 공식 자료와 커�
 [[autodoc]] RobertaTokenizerFast
     - build_inputs_with_special_tokens
 
-<frameworkcontent>
-<pt>
 
 ## RobertaModel
 
@@ -150,81 +148,3 @@ RoBERTa를 처음 다룰 때 도움이 되는 Hugging Face 공식 자료와 커�
 [[autodoc]] RobertaForQuestionAnswering
     - forward
 
-</pt>
-<tf>
-
-## TFRobertaModel
-
-[[autodoc]] TFRobertaModel
-    - call
-
-## TFRobertaForCausalLM
-
-[[autodoc]] TFRobertaForCausalLM
-    - call
-
-## TFRobertaForMaskedLM
-
-[[autodoc]] TFRobertaForMaskedLM
-    - call
-
-## TFRobertaForSequenceClassification
-
-[[autodoc]] TFRobertaForSequenceClassification
-    - call
-
-## TFRobertaForMultipleChoice
-
-[[autodoc]] TFRobertaForMultipleChoice
-    - call
-
-## TFRobertaForTokenClassification
-
-[[autodoc]] TFRobertaForTokenClassification
-    - call
-
-## TFRobertaForQuestionAnswering
-
-[[autodoc]] TFRobertaForQuestionAnswering
-    - call
-
-</tf>
-<jax>
-
-## FlaxRobertaModel
-
-[[autodoc]] FlaxRobertaModel
-    - __call__
-
-## FlaxRobertaForCausalLM
-
-[[autodoc]] FlaxRobertaForCausalLM
-    - __call__
-
-## FlaxRobertaForMaskedLM
-
-[[autodoc]] FlaxRobertaForMaskedLM
-    - __call__
-
-## FlaxRobertaForSequenceClassification
-
-[[autodoc]] FlaxRobertaForSequenceClassification
-    - __call__
-
-## FlaxRobertaForMultipleChoice
-
-[[autodoc]] FlaxRobertaForMultipleChoice
-    - __call__
-
-## FlaxRobertaForTokenClassification
-
-[[autodoc]] FlaxRobertaForTokenClassification
-    - __call__
-
-## FlaxRobertaForQuestionAnswering
-
-[[autodoc]] FlaxRobertaForQuestionAnswering
-    - __call__
-
-</jax>
-</frameworkcontent>

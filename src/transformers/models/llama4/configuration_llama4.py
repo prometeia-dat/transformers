@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PretrainedConfig, layer_type_validation
 from ...utils import logging
 
 
@@ -56,7 +57,6 @@ class Llama4VisionConfig(PretrainedConfig):
             The size (resolution) of each patch.
         norm_eps (`float`, *optional*, defaults to 1e-05):
             The epsilon used by the layer normalization layers.
-        vision_feature_layer (``, *optional*, defaults to -1): TODO
         vision_feature_select_strategy (`int`, *optional*, defaults to `"default"`): TODO
         initializer_range (`float`, *optional*, defaults to 0.02):
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
@@ -93,7 +93,6 @@ class Llama4VisionConfig(PretrainedConfig):
         image_size: int = 448,
         patch_size: int = 14,
         norm_eps: float = 1e-5,
-        vision_feature_layer=-1,
         vision_feature_select_strategy="default",
         initializer_range: float = 0.02,
         pixel_shuffle_ratio=0.5,
@@ -122,9 +121,23 @@ class Llama4VisionConfig(PretrainedConfig):
         self.multi_modal_projector_bias = multi_modal_projector_bias
         self.projector_dropout = projector_dropout
         self.attention_dropout = attention_dropout
-        self.vision_feature_layer = vision_feature_layer
         self.vision_feature_select_strategy = vision_feature_select_strategy
         self.rope_theta = rope_theta
+
+        self._vision_feature_layer = kwargs.get("vision_feature_layer", -1)
+
+        @property
+        def vision_feature_layer(self):
+            warnings.warn(
+                "The `vision_feature_layer` attribute is deprecated and will be removed in v4.58.0.",
+                FutureWarning,
+            )
+            return self._vision_feature_layer
+
+        @vision_feature_layer.setter
+        def vision_feature_layer(self, value):
+            self._vision_feature_layer = value
+
         super().__init__(**kwargs)
 
 
@@ -210,11 +223,11 @@ class Llama4TextConfig(PretrainedConfig):
                 `beta_slow` (`float`, *optional*):
                     Only used with 'yarn'. Parameter to set the boundary for interpolation (only) in the linear
                     ramp function. If unspecified, it defaults to 1.
-                `short_factor` (`List[float]`, *optional*):
+                `short_factor` (`list[float]`, *optional*):
                     Only used with 'longrope'. The scaling factor to be applied to short contexts (<
                     `original_max_position_embeddings`). Must be a list of numbers with the same length as the hidden
                     size divided by the number of attention heads divided by 2
-                `long_factor` (`List[float]`, *optional*):
+                `long_factor` (`list[float]`, *optional*):
                     Only used with 'longrope'. The scaling factor to be applied to long contexts (<
                     `original_max_position_embeddings`). Must be a list of numbers with the same length as the hidden
                     size divided by the number of attention heads divided by 2
@@ -224,16 +237,22 @@ class Llama4TextConfig(PretrainedConfig):
                     Only used with 'llama3'. Scaling factor applied to high frequency components of the RoPE
             <TODO>
             <TODO>
-        no_rope_layers (`int`, *optional*): TODO
-        no_rope_layer_interval (`int`, *optional*, defaults to 4): TODO
+        no_rope_layers (`list[int]`, *optional*):
+            List with at least the same length as the number of layers in the model.
+            A `1` at an index position indicates that the corresponding layer will use RoPE,
+            while a `0` indicates that it's a NoPE layer.
+        no_rope_layer_interval (`int`, *optional*, defaults to 4):
+            If `no_rope_layers` is `None`, it will be created using a NoPE layer every
+            `no_rope_layer_interval` layers.
         attention_chunk_size (`int`, *optional*, defaults to 8192):
             <TODO>
+        layer_types (`list`, *optional*):
+            Attention pattern for each layer.
         attn_temperature_tuning (`bool`, *optional*, defaults to `True`):
             Whether to dynamically scale the attention temperature for each query token based on sequence length.
             Recommended for long sequences (e.g., >32k tokens) to maintain stable output results.
         floor_scale (`int`, *optional*, defaults to 8192): TODO
         attn_scale (`int`, *optional*, defaults to 0.1): TODO
-        cache_implementation (`<fill_type>`, *optional*, defaults to `"hybrid"`): <fill_docstring>
 
     Example:
     """
@@ -245,9 +264,6 @@ class Llama4TextConfig(PretrainedConfig):
         "layers.*.self_attn.k_proj": "colwise",
         "layers.*.self_attn.v_proj": "colwise",
         "layers.*.self_attn.o_proj": "rowwise",
-        "layers.*.input_layernorm.weight": "sequence_parallel",
-        "layers.*.post_attention_layernorm.weight": "sequence_parallel",
-        "norm.weight": "sequence_parallel",
         "layers.*.feed_forward.shared_expert.gate_proj": "local_colwise",
         "layers.*.feed_forward.shared_expert.up_proj": "local_colwise",
         "layers.*.feed_forward.shared_expert.down_proj": "local_rowwise",
@@ -258,6 +274,19 @@ class Llama4TextConfig(PretrainedConfig):
         "layers.*.feed_forward.up_proj": "local_colwise",
         "layers.*.feed_forward.down_proj": "local_rowwise",
         "layers.*.feed_forward": "gather",
+    }
+    base_model_ep_plan = {
+        "layers.*.self_attn.q_proj": "colwise",
+        "layers.*.self_attn.k_proj": "colwise",
+        "layers.*.self_attn.v_proj": "colwise",
+        "layers.*.self_attn.o_proj": "rowwise",
+        "layers.*.feed_forward.experts.gate_up_proj": "grouped_gemm",  # row because not linear
+        "layers.*.feed_forward.experts.down_proj": "grouped_gemm",  # col because not linear
+        "layers.*.feed_forward.experts": "gather",  # all reduce
+        "layers.*.feed_forward.gate_proj": "local_colwise",
+        "layers.*.feed_forward.up_proj": "local_colwise",
+        "layers.*.feed_forward.down_proj": "local_rowwise",
+        "layers.*.feed_forward.router": "ep_router",
     }
 
     def __init__(
@@ -293,10 +322,10 @@ class Llama4TextConfig(PretrainedConfig):
         no_rope_layers=None,
         no_rope_layer_interval=4,
         attention_chunk_size=8192,
+        layer_types=None,
         attn_temperature_tuning=True,
         floor_scale=8192,
         attn_scale=0.1,
-        cache_implementation="hybrid",
         **kwargs,
     ):
         super().__init__(
@@ -318,7 +347,6 @@ class Llama4TextConfig(PretrainedConfig):
         self.num_attention_heads = num_attention_heads
         self.rope_scaling = rope_scaling
         self.attention_bias = False
-        self.cache_implementation = cache_implementation
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
@@ -339,11 +367,15 @@ class Llama4TextConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.router_jitter_noise = router_jitter_noise
+
+        # Backwards compatibility
+        if no_rope_layers == []:
+            no_rope_layers = None
+
         default_no_rope_layers = [
             int((layer_idx + 1) % no_rope_layer_interval != 0) for layer_idx in range(self.num_hidden_layers)
         ]
 
-        # no_rope_layers == [] is invalid as we cannot have 0 layers
         self.no_rope_layers = no_rope_layers if no_rope_layers else default_no_rope_layers
 
         self.interleave_moe_layer_step = interleave_moe_layer_step
@@ -353,6 +385,13 @@ class Llama4TextConfig(PretrainedConfig):
             else list(range(interleave_moe_layer_step - 1, num_hidden_layers, interleave_moe_layer_step))
         )
         self.attention_chunk_size = attention_chunk_size
+
+        self.layer_types = layer_types
+        if layer_types is None:
+            self.layer_types = [
+                "chunked_attention" if no_rope else "full_attention" for no_rope in self.no_rope_layers
+            ]
+        layer_type_validation(self.layer_types, self.num_hidden_layers)
 
 
 class Llama4Config(PretrainedConfig):

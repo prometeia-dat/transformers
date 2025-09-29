@@ -13,6 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# /// script
+# dependencies = [
+#     "transformers @ git+https://github.com/huggingface/transformers.git",
+#     "datasets[audio] >= 1.18.0",
+#     "torch >= 1.5",
+#     "torchaudio",
+#     "librosa",
+#     "jiwer",
+#     "evaluate",
+# ]
+# ///
+
 """Fine-tuning a 🤗 Transformers CTC adapter model for automatic speech recognition"""
 
 import functools
@@ -47,12 +59,12 @@ from transformers import (
 )
 from transformers.models.wav2vec2.modeling_wav2vec2 import WAV2VEC2_ADAPTER_SAFE_FILE
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.52.0.dev0")
+check_min_version("4.57.0.dev0")
 
 require_version("datasets>=1.18.0", "To fix: pip install -r examples/pytorch/speech-recognition/requirements.txt")
 
@@ -236,7 +248,7 @@ class DataTrainingArguments:
         metadata={
             "help": (
                 "The token to use as HTTP bearer authorization for remote files. If not specified, will use the token "
-                "generated when running `huggingface-cli login` (stored in `~/.huggingface`)."
+                "generated when running `hf auth login` (stored in `~/.huggingface`)."
             )
         },
     )
@@ -383,10 +395,6 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_speech_recognition_ctc_adapter", model_args, data_args)
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -804,7 +812,7 @@ def main():
     if "common_voice" in data_args.dataset_name:
         kwargs["language"] = config_name
 
-    # make sure that adapter weights are saved seperately
+    # make sure that adapter weights are saved separately
     adapter_file = WAV2VEC2_ADAPTER_SAFE_FILE.format(data_args.target_language)
     adapter_file = os.path.join(training_args.output_dir, adapter_file)
     logger.info(f"Saving adapter weights under {adapter_file}...")
