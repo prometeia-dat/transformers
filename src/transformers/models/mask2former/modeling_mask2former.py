@@ -943,7 +943,7 @@ class Mask2FormerSinePositionEmbedding(nn.Module):
         self.scale = 2 * math.pi if scale is None else scale
 
         # added buffers to avoid tensors created at runtime for torchscript export
-        self.register_buffer("mask", torch.zeros((1, 1, 1), dtype=torch.bool))
+        self.register_buffer("mask", torch.zeros((1, 1, 1), dtype=torch.float32))
         self.register_buffer(
             "dim_t",
             torch.arange(self.num_pos_feats, dtype=torch.int64).to(torch.float32),
@@ -960,7 +960,7 @@ class Mask2FormerSinePositionEmbedding(nn.Module):
     ) -> Tensor:
         if mask is None:
             mask = self.mask.repeat(shape[0], shape[2], shape[3])
-        not_mask = (~mask).to(self.mask.dtype)
+        not_mask = (1 - mask).to(self.mask.dtype)
         y_embed = not_mask.cumsum(1)
         x_embed = not_mask.cumsum(2)
         if self.normalize:
@@ -1520,7 +1520,6 @@ class Mask2FormerPixelDecoder(nn.Module):
             for i, x in enumerate(position_embeddings)
         ]
         level_pos_embed_flat = torch.cat(level_pos_embed_flat, 1)
-
         level_start_index = torch.cat(
             (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
         )
@@ -1531,7 +1530,6 @@ class Mask2FormerPixelDecoder(nn.Module):
             ],
             1,
         )
-
         # Send input_embeds_flat + masks_flat + level_pos_embed_flat (backbone + proj layer output) through encoder
         if encoder_outputs is None:
             encoder_outputs = self.encoder(
